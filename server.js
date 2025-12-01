@@ -3,14 +3,10 @@ const cors = require('cors');
 const {ethers} = require("ethers");
 require('dotenv').config();
 const DAO_ABI = require('./abis/DAO.json');
+const storage = require("./storage/storage.js");
 
 const proposalsRouter = require("./routes/proposals.js");
-
-// import express from 'express';
-// import cors from 'cors';
-// import {ethers} from 'ethers';
-// import dotenv from 'dotenv';
-// import DAO_ABI from './abis/DAO.json';
+let timer;
 
 
 
@@ -20,38 +16,225 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-app.use("/api", proposalsRouter);
 
 const port = process.env.PORT || 3000;
 const rpcUrl = process.env.RPC_URL;
 const daoAddress = process.env.DAO_ADDRESS;
 const privateKey = process.env.PRIVATE_KEY;
 
+
+const startBlock = Number(process.env.START_BLOCK) || 0;
+const batchSize = Number(process.env.BATCH_SIZE) || 10000;
+const poolingInterval = Number(process.env.POLLING_INTERVAL) || 1000;
+
+
 const provider = new ethers.JsonRpcProvider(rpcUrl);
 const wallet = new ethers.Wallet(privateKey, provider);
 const daoContract = new ethers.Contract(daoAddress, DAO_ABI, wallet);
 
-const storage = {
-  events: [],
-  proposals: new Map()
+
+async function handleProposalCreated(events) {
+  for (let event of events) {
+    try {
+      const [id, creator, description ] = event.args;
+
+      const proposal = {
+        id: id.toString(),
+        creator: creator,
+        description: description,
+        startBlock: event.blockNumber,
+        createdAt: new Date().toISOString(),
+        endBlock: null,
+        votesFor: "0",
+        votesAgainst: "0",
+        executed: false,
+        transactionHash: event.transactionHash,
+        votes: []
+      }
+
+      storage.proposals.set(id.toString(), proposal);
+      storage.totalProposals++;
+
+    } catch(e) {
+      console.error("Error processing ProposalCreated event:", e);
+    }
+  }
+
 }
 
-// storage.set(1, { id: 1, title: "Increase Staking Rewards", description: "Proposal to increase staking rewards by 5%." });
+
+const handleVoted = async (events) => {
+  for (let event of events) {
+    try {
+      const [id, voter, support, amount ] = event.args;
+
+      console.log("Voted event detected");
+      console.log("voter: ", voter);
+      console.log("support: ", support);
+      console.log("amount: ", amount.toString());
+      console.log("Transaction Hash:", event.transactionHash);
+      console.log("Block Number:", event.blockNumber);
+
+      const vote = {
+        voter,
+        support,
+        amount: amount.toString(),
+        blockNumber: event.blockNumber,
+        transactionHash: event.transactionHash,
+        timeStamp: new Date().toISOString()
+      }
+
+      const proposal = storage.proposals.get(id.toString());
+      if (!proposal) {
+        console.error("Proposal not found for VoteCast event:", id.toString());
+        continue;
+      }
+
+      proposal.votes.push(vote);
+      proposal.votesFor = support ? String(BigInt(proposal.votesFor)) + amount : proposal.votesFor;
+      proposal.votesAgainst = support ? proposal.votesAgainst : String(BigInt(proposal.votesAgainst) + amount);
+
+    } catch(e) {
+      console.error("Error processing ProposalCreated event:", e);
+    }
+  }
+}
 
 
-// app.get('/', (req, res) => {
-//   res.status(200).send(storage.proposals);
-// });
+const handleProposalExecuted = async (events) => {
+  for (let event of events) {
+    try {
+      const [id] = event.args;
+
+      console.log("Processing ProposalExecuted for ID:", id.toString());
+      console.log("Transaction Hash:", event.transactionHash);
+      console.log("Block Number:", event.blockNumber);
+
+      const proposal = storage.proposals.get(id.toString());
+      if (!proposal) {
+        console.error("Proposal not found for ProposalExecuted event:", id.toString());
+        continue;
+      }
+
+      proposal.executed = true;
+      proposal.executedAt = new Date().toISOString();
+      storage.totalProposalExecuted++;
+
+    } catch(e) {
+      console.error("Error processing ProposalCreated event:", e);
+    }
+  }
+}
+
+
+async function poolForEvents() {
+  try {
+    const currentBlock = await provider.getBlockNumber();
+    const fromBlock = storage.lastBlock + 1;
+
+    if (fromBlock > currentBlock) {
+      return;
+    }
+
+    const [proposalCreatedEvents, votedEvents, proposalExecutedEvents ] = await Promise.all([
+      daoContract.queryFilter("ProposalCreated", fromBlock, currentBlock),
+      daoContract.queryFilter("VoteCast", fromBlock, currentBlock),
+      daoContract.queryFilter("ProposalExecuted", fromBlock, currentBlock)
+    ])
+
+    if (proposalCreatedEvents.length > 0) {
+      await handleProposalCreated(proposalCreatedEvents);
+    }
+
+    if (votedEvents.length > 0 ) {
+      await handleVoted(votedEvents);
+    }
+
+    if (proposalExecutedEvents.length > 0) {
+      await handleProposalExecuted(proposalExecutedEvents);
+    }
+
+    storage.lastBlock = currentBlock;
+
+  } catch (e) {
+    console.error('Error proposal event:', e.message);
+  }
+}
+
+
+async function startPooling() {
+  console.log("Starting event polling...");
+
+  timer = setInterval(poolForEvents, poolingInterval);
+}
+
+
+async function loadHistoricalEvents() {
+  try {
+
+    const currentBlock = await provider.getBlockNumber();
+    let fromBlock = startBlock;
+    const toBlock = currentBlock;
+
+    const blockToScan = toBlock - fromBlock + 1;
+    const batches = Math.ceil(blockToScan / batchSize);
+
+    let allProposalCreatedEvents = [];
+    let allVotedEvents = [];
+    let allProposalExecutedEvents = [];
+
+    for (let i = 0; i < batches; i++) {
+      const batchFrom = fromBlock + (i * batchSize);
+      let batchTo = Math.min(batchFrom + batchSize -1, toBlock);
+
+
+      const [proposalCreatedEvents, votedEvents, proposalExecutedEvents ] = await Promise.all([
+        daoContract.queryFilter("ProposalCreated", batchFrom, batchTo),
+        daoContract.queryFilter("VoteCast", batchFrom, batchTo),
+        daoContract.queryFilter("ProposalExecuted", batchFrom, batchTo)
+      ]);
+
+      allProposalCreatedEvents.push(...proposalCreatedEvents);
+      allVotedEvents.push(...votedEvents);
+      allProposalExecutedEvents.push(...proposalExecutedEvents);
+    }
+
+    if (allProposalCreatedEvents.length > 0) {
+      await handleProposalCreated(allProposalCreatedEvents);
+    }
+
+    if (allVotedEvents.length > 0 ) {
+      await handleVoted(allVotedEvents);
+    }
+
+    if (allProposalExecutedEvents.length > 0) {
+      await handleProposalExecuted(allProposalExecutedEvents);
+    }
+
+    storage.lastBlock = toBlock;
+    console.log("Historical events loaded up to block:", toBlock);
+
+  } catch(e) {
+    console.error("Error loading historical events:", e.message);
+  }
+}
+
+
+app.use("/api", proposalsRouter);
+
 
 
 async function initialize() {
   try {
 
     const network = await provider.getNetwork();
-    console.log("cuurent network: ", network.chainId);
+    console.log("current network: ", network.chainId);
 
     const blockNumber = await provider.getBlockNumber();
     console.log("current block number: ", blockNumber);
+
+    await loadHistoricalEvents();
+    await startPooling();
 
     app.listen(port, () => console.log(`Server running on port ${port}`));
   } catch (e) {
