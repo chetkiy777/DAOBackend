@@ -6,7 +6,11 @@ const DAO_ABI = require('./abis/DAO.json');
 const storage = require("./storage/storage.js");
 
 const proposalsRouter = require("./routes/proposals.js");
+const authRouter = require("./routes/auth.js");
+
 let timer;
+
+const {handleProposalCreated, handleProposalExecuted, handleVoted} = require('./events/index.js');
 
 
 
@@ -15,6 +19,11 @@ const app = express();
 
 app.use(express.json());
 app.use(cors());
+
+
+app.use("/api", proposalsRouter);
+app.use("/api/auth", authRouter);
+
 
 
 const port = process.env.PORT || 3000;
@@ -33,100 +42,6 @@ const wallet = new ethers.Wallet(privateKey, provider);
 const daoContract = new ethers.Contract(daoAddress, DAO_ABI, wallet);
 
 
-async function handleProposalCreated(events) {
-  for (let event of events) {
-    try {
-      const [id, creator, description ] = event.args;
-
-      const proposal = {
-        id: id.toString(),
-        creator: creator,
-        description: description,
-        startBlock: event.blockNumber,
-        createdAt: new Date().toISOString(),
-        endBlock: null,
-        votesFor: "0",
-        votesAgainst: "0",
-        executed: false,
-        transactionHash: event.transactionHash,
-        votes: []
-      }
-
-      storage.proposals.set(id.toString(), proposal);
-      storage.totalProposals++;
-
-    } catch(e) {
-      console.error("Error processing ProposalCreated event:", e);
-    }
-  }
-
-}
-
-
-const handleVoted = async (events) => {
-  for (let event of events) {
-    try {
-      const [id, voter, support, amount ] = event.args;
-
-      console.log("Voted event detected");
-      console.log("voter: ", voter);
-      console.log("support: ", support);
-      console.log("amount: ", amount.toString());
-      console.log("Transaction Hash:", event.transactionHash);
-      console.log("Block Number:", event.blockNumber);
-
-      const vote = {
-        voter,
-        support,
-        amount: amount.toString(),
-        blockNumber: event.blockNumber,
-        transactionHash: event.transactionHash,
-        timeStamp: new Date().toISOString()
-      }
-
-      const proposal = storage.proposals.get(id.toString());
-      if (!proposal) {
-        console.error("Proposal not found for VoteCast event:", id.toString());
-        continue;
-      }
-
-      proposal.votes.push(vote);
-      proposal.votesFor = support ? String(BigInt(proposal.votesFor)) + amount : proposal.votesFor;
-      proposal.votesAgainst = support ? proposal.votesAgainst : String(BigInt(proposal.votesAgainst) + amount);
-
-    } catch(e) {
-      console.error("Error processing ProposalCreated event:", e);
-    }
-  }
-}
-
-
-const handleProposalExecuted = async (events) => {
-  for (let event of events) {
-    try {
-      const [id] = event.args;
-
-      console.log("Processing ProposalExecuted for ID:", id.toString());
-      console.log("Transaction Hash:", event.transactionHash);
-      console.log("Block Number:", event.blockNumber);
-
-      const proposal = storage.proposals.get(id.toString());
-      if (!proposal) {
-        console.error("Proposal not found for ProposalExecuted event:", id.toString());
-        continue;
-      }
-
-      proposal.executed = true;
-      proposal.executedAt = new Date().toISOString();
-      storage.totalProposalExecuted++;
-
-    } catch(e) {
-      console.error("Error processing ProposalCreated event:", e);
-    }
-  }
-}
-
-
 async function poolForEvents() {
   try {
     const currentBlock = await provider.getBlockNumber();
@@ -138,7 +53,7 @@ async function poolForEvents() {
 
     const [proposalCreatedEvents, votedEvents, proposalExecutedEvents ] = await Promise.all([
       daoContract.queryFilter("ProposalCreated", fromBlock, currentBlock),
-      daoContract.queryFilter("VoteCast", fromBlock, currentBlock),
+      daoContract.queryFilter("Voted", fromBlock, currentBlock),
       daoContract.queryFilter("ProposalExecuted", fromBlock, currentBlock)
     ])
 
@@ -190,7 +105,7 @@ async function loadHistoricalEvents() {
 
       const [proposalCreatedEvents, votedEvents, proposalExecutedEvents ] = await Promise.all([
         daoContract.queryFilter("ProposalCreated", batchFrom, batchTo),
-        daoContract.queryFilter("VoteCast", batchFrom, batchTo),
+        daoContract.queryFilter("Voted", batchFrom, batchTo),
         daoContract.queryFilter("ProposalExecuted", batchFrom, batchTo)
       ]);
 
@@ -220,7 +135,6 @@ async function loadHistoricalEvents() {
 }
 
 
-app.use("/api", proposalsRouter);
 
 
 
