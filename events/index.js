@@ -61,7 +61,7 @@ const handleVoted = async (events) => {
       }
 
       proposal.votes.push(vote);
-      proposal.voteCounterFor = support ? String(BigInt(proposal.voteCounterFor)) + amount : proposal.voteCounterFor;
+      proposal.voteCounterFor = support ? String(BigInt(proposal.voteCounterFor) + amount)  : proposal.voteCounterFor;
       proposal.voteCounterAgainst = support ? proposal.voteCounterAgainst : String(BigInt(proposal.voteCounterAgainst) + amount);
 
     } catch(e) {
